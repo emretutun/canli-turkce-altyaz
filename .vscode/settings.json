@@ -1,0 +1,8 @@
+{
+    // Türkçe karakterleri (ı, ş, ğ, ü, ö, ç, İ) "şüpheli karakter" diye kutu içine alma
+    "editor.unicodeHighlight.allowedLocales": { "tr": true },
+    "editor.unicodeHighlight.ambiguousCharacters": false,
+    "editor.unicodeHighlight.nonBasicASCII": false,
+    "files.encoding": "utf8",
+    "python.defaultInterpreterPath": "${env:LOCALAPPDATA}\\Programs\\Python\\Python312\\python.exe"
+}

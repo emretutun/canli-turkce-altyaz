@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Model dosyaları (README'deki komutla indirilir)
+modeller/*.onnx
+
+# Test ve yayın kayıtları: kanal içeriği depoya girmesin
+*.mp4
+*.mxf
+*.wav
+*.srt
+*.jpg
+*.png
+canli_kayit_*.txt
