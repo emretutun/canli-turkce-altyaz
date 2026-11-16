@@ -85,6 +85,122 @@ def birlestir(kelimeler) -> str:
     return metin
 
 
+class IsimDuzeltici:
+    """
+    Özel isimleri (oyuncu, siyasetçi, yabancı isimler) doğru yazdırır.
+
+    isimler.txt biçimi (her satır bir isim, # ile başlayan satır açıklama):
+        Torreira
+        Oh Hyeon-gyu = Oyan Yuh, Oiyanyu
+    "=" sonrası, Whisper'ın o ismi yanlış yazdığı görülmüş hâlleridir (virgülle).
+
+    İki katmanda çalışır:
+      1. İsimler Whisper'a "hotwords" olarak verilir, model doğru yazmaya yönelir.
+      2. Tanıma sonrası: bilinen yanlış hâller birebir, isme çok benzeyen büyük
+         harfli kelimeler de benzerlikle düzeltilir. Ek korunur (Torayra'nın -> Torreira'nın).
+    """
+
+    BENZERLIK = 0.8   # 0-1; düşürürsen daha çok kelimeyi isme çevirir (yanlış düzeltme riski)
+    EN_KISA = 5       # bundan kısa kelimeler benzerlikle düzeltilmez
+
+    def __init__(self, yol):
+        self.isimler = []          # doğru yazılışlar
+        self.yanlislar = {}        # sade(yanlış hâl, boşluksuz) -> doğru isim
+        self.parcalar = {}         # benzerlik için: sade(isim parçası) -> doğru parça
+        self.butunler = {}         # çok parçalı isimler: anahtar ("ohhyeongyu") -> doğru isim
+        self.en_uzun = 1           # en uzun yanlış hâl kaç kelime
+        for satir in Path(yol).read_text(encoding="utf-8-sig").splitlines():
+            satir = satir.split("#", 1)[0].strip()
+            if not satir:
+                continue
+            dogru, _, yanlis = satir.partition("=")
+            dogru = dogru.strip()
+            if not dogru:
+                continue
+            self.isimler.append(dogru)
+            parca_sayisi = len(re.split(r"[\s\-]+", dogru))
+            if parca_sayisi > 1:
+                self.butunler[self._anahtar(dogru)] = dogru
+                self.en_uzun = max(self.en_uzun, parca_sayisi + 1)
+            for y in yanlis.split(","):
+                if y.strip():
+                    self.yanlislar[self._anahtar(y)] = dogru
+                    # Whisper kelimeyi hece hece de bölebilir; boşluk sayısına 2 pay bırak
+                    self.en_uzun = max(self.en_uzun, len(y.split()) + 2)
+            for parca in [dogru] + dogru.split():
+                if len(sade(parca)) >= self.EN_KISA:
+                    self.parcalar[sade(parca)] = parca
+
+    @staticmethod
+    def _anahtar(metin):
+        return sade(metin.replace(" ", ""))
+
+    def ipucu(self):
+        """Whisper'a verilecek hotwords metni."""
+        return ", ".join(self.isimler) or None
+
+    def _benzer(self, kelime):
+        import difflib
+        temiz = kelime.strip()
+        if len(sade(temiz)) < self.EN_KISA or not temiz[:1].isupper():
+            return None
+        if sade(temiz) in self.parcalar:
+            return None  # zaten doğru
+        en_iyi = difflib.get_close_matches(sade(temiz), self.parcalar, n=1, cutoff=self.BENZERLIK)
+        return self.parcalar[en_iyi[0]] if en_iyi else None
+
+    def _grup_eslesmesi(self, grup, benzerlikle):
+        """Bir ya da birkaç kelimelik grup bir isme karşılık geliyor mu?"""
+        anahtar = self._anahtar("".join(k[2] for k in grup))
+        if not benzerlikle:
+            return self.yanlislar.get(anahtar) or self.butunler.get(anahtar)
+        if len(grup) > 1 and len(anahtar) >= 6 and grup[0][2].strip()[:1].isupper():
+            # "O Hyeon -gyu" gibi parçalara bölünmüş çok kelimeli isim.
+            # Uzunluk yakın olmalı; yoksa isimden sonraki kelimeyi de yutar.
+            import difflib
+            adaylar = [b for b in self.butunler if abs(len(b) - len(anahtar)) <= 2]
+            en_iyi = difflib.get_close_matches(anahtar, adaylar, n=1, cutoff=self.BENZERLIK)
+            if en_iyi:
+                return self.butunler[en_iyi[0]]
+        return None
+
+    def duzelt(self, kelimeler):
+        """[(bas, son, kelime)] listesini düzeltilmiş hâliyle döndür."""
+        sonuc, i = [], 0
+        while i < len(kelimeler):
+            # 1) Bilinen yanlış hâl / parçalanmış isim (ör. "Oyan" "Yuh", "O" "Hyeon" "-gyu").
+            #    Önce birebir eşleşme, bulunmazsa benzerlik denenir.
+            eslesme = None
+            for benzerlikle in (False, True):
+                for n in range(min(self.en_uzun, len(kelimeler) - i), 0, -1):
+                    grup = kelimeler[i:i + n]
+                    # tire ("-gyu") ismin parçası olabilir; ek/noktalama ("'ta", ",") olamaz
+                    if n > 1 and any(yapisik(k[2]) and not k[2].startswith("-") for k in grup[1:]):
+                        continue
+                    dogru = self._grup_eslesmesi(grup, benzerlikle)
+                    if dogru:
+                        eslesme = (grup, dogru)
+                        break
+                if eslesme:
+                    break
+            if eslesme:
+                grup, dogru = eslesme
+                bosluk = " " if grup[0][2].startswith(" ") else ""
+                noktalama = re.search(r"[.,;:!?…]+$", grup[-1][2].strip())
+                sonuc.append((grup[0][0], grup[-1][1],
+                              bosluk + dogru + (noktalama.group() if noktalama else "")))
+                i += len(grup)
+            else:
+                # 2) İsme çok benzeyen tek kelime
+                bas, son, k = kelimeler[i]
+                dogru = self._benzer(k)
+                if dogru:
+                    k = (" " if k.startswith(" ") else "") + dogru
+                sonuc.append((bas, son, k))
+                i += 1
+        return sonuc
+
+
 class CanliYazici:
     """
     Sürekli gelen sesi tamponda tutar, her turda tamponu yeniden tanır ve
@@ -92,10 +208,11 @@ class CanliYazici:
     Kesinleşen kelime bir daha değişmez; ekrandaki yazı titremez.
     """
 
-    def __init__(self, model, beam, sessizlik_esigi):
+    def __init__(self, model, beam, sessizlik_esigi, duzeltici=None):
         self.model = model
         self.beam = beam
         self.esik = sessizlik_esigi
+        self.duzeltici = duzeltici
         self.ses = np.zeros(0, dtype=np.float32)
         self.ses_baslangic = 0.0   # tampondaki ilk örneğin akış zamanı (sn)
         self.kesin = []            # [(bas, son, kelime)]
@@ -114,19 +231,42 @@ class CanliYazici:
         son = self.ses[-int(sn * ORNEK_HIZI):]
         return len(son) > 0 and float(np.sqrt(np.mean(son ** 2))) < self.esik
 
-    def _ortusmeyi_at(self, yeni):
-        """Tampon sınırında aynı kelimeler iki kez gelmesin."""
-        if not self.kesin or not yeni or abs(yeni[0][0] - self.son_kesin_zaman) > 1:
-            return yeni
-        for n in range(min(5, len(self.kesin), len(yeni)), 0, -1):
-            if [sade(k[2]) for k in self.kesin[-n:]] == [sade(y[2]) for y in yeni[:n]]:
-                return yeni[n:]
-        return yeni
+    def _yeni_kelimeler(self, ham):
+        """Tamponun yeni tanımasından, ekrana zaten yazılmış kelimelerden SONRAKİLERİ seç.
+
+        Zamana bakarak ayırmak kelime kaybettiriyordu: Whisper duraklamadan önceki son
+        kelimenin bitişini bazen saniyelerce uzatır, o aralıkta gerçekten söylenen sözler
+        "zaten yazıldı" sanılıp atılıyordu. Bunun yerine yazılmış son kelimeleri yeni
+        tanımada metin olarak bulup sonrasını alıyoruz."""
+        if not self.kesin:
+            return ham
+        son_bas = self.kesin[-1][0]
+        for n in range(min(6, len(self.kesin), len(ham)), 0, -1):
+            kuyruk = [sade(k[2]) for k in self.kesin[-n:]]
+            for p in range(len(ham) - n + 1):
+                if ([sade(h[2]) for h in ham[p:p + n]] == kuyruk
+                        and abs(ham[p + n - 1][0] - son_bas) <= 1.0):
+                    return ham[p + n:]
+        # Yazılmış kelimeler yeni tanımada yok (tampon kesildi ya da Whisper farklı duydu).
+        # Önceki turda bekleyen kelimeler yeni tanımada varsa oradan devam et: Whisper
+        # tamponun başındaki kelimelere bazen yanlış zaman verir, zamana bakmak onları atar.
+        if self.onceki:
+            ilk = [sade(k[2]) for k in self.onceki[:2]]
+            for p in range(len(ham) - len(ilk) + 1):
+                if [sade(h[2]) for h in ham[p:p + len(ilk)]] == ilk:
+                    return ham[p:]
+        # Son çare: son yazılan kelimeden sonra başlayanlar
+        return [h for h in ham if h[0] > son_bas + 0.15]
 
     def _tamponu_kirp(self):
         sure = len(self.ses) / ORNEK_HIZI
         if sure > TAMPON_UST_SINIR:
-            kes = self.son_kesin_zaman - self.ses_baslangic
+            # Son yazılan kelimenin (düzeltilmiş) bitişinden kes, ama bekleyen bir sonraki
+            # kelimenin içine girme: kesilen yerdeki söz kaybolurdu
+            kes_zaman = self.kesin[-1][1] if self.kesin else 0.0
+            if self.onceki:
+                kes_zaman = min(kes_zaman, self.onceki[0][0] - 0.05)
+            kes = kes_zaman - self.ses_baslangic
             if kes <= 0 or sure - kes > TAMPON_UST_SINIR:
                 # Uzun süredir kesinleşen yok (müzik, gürültü): son 5 sn'yi tut
                 kes = sure - 5.0
@@ -145,18 +285,23 @@ class CanliYazici:
             word_timestamps=True,
             vad_filter=True,
             initial_prompt=baglam,
+            hotwords=self.duzeltici.ipucu() if self.duzeltici else None,
             condition_on_previous_text=False,
         )
-        yeni = []
+        ham = []
         for seg in segmentler:
             if any(u in seg.text.lower() for u in UYDURMALAR):
                 continue
             for w in seg.words or []:
                 bas = self.ses_baslangic + w.start
-                if bas >= self.son_kesin_zaman - 0.1:
-                    # boşluğu atmıyoruz: ekin kelimeye bitişik olup olmadığını o söylüyor
-                    yeni.append((bas, self.ses_baslangic + w.end, w.word))
-        yeni = self._ortusmeyi_at(yeni)
+                # Whisper'ın uzattığı bitişi makul bir süreye indir (konuşmacı ayırma ve
+                # duraklama tespiti gerçek konuşma süresini görsün)
+                son = min(self.ses_baslangic + w.end, bas + 0.3 + 0.1 * len(w.word.strip()))
+                # boşluğu atmıyoruz: ekin kelimeye bitişik olup olmadığını o söylüyor
+                ham.append((bas, son, w.word))
+        if self.duzeltici:
+            ham = self.duzeltici.duzelt(ham)
+        yeni = self._yeni_kelimeler(ham)
 
         kesinlesen = []
         while yeni and self.onceki and sade(yeni[0][2]) == sade(self.onceki[0][2]):
@@ -186,7 +331,7 @@ class KonusmaciAyirici:
     duyulursa yeni konuşmacı açılır (tek pencerelik gürültü sahte kişi yaratmasın).
     """
     PENCERE = 2.0
-    ADIM = 1.0
+    ADIM = 0.5     # yarım saniyede bir pencere: konuşmacı değişimi daha erken yakalanır
     GECMIS = 30.0  # bu kadar saniyelik ses ve etiket tutulur
 
     def __init__(self, model_yolu, esik, en_fazla, sessizlik_esigi):
@@ -220,12 +365,14 @@ class KonusmaciAyirici:
             i = int(np.argmax(benz))
         elif len(self.merkezler) >= self.en_fazla:
             i = int(np.argmax(benz))
-        elif self.aday is not None and float(self.aday @ e) >= self.esik:
-            self.merkezler.append(self.aday + e)  # yeni ses iki kez duyuldu: yeni konuşmacı
+        elif self.aday is not None and float(self.aday[0] @ e) >= self.esik:
+            # yeni ses iki kez duyuldu: yeni konuşmacı. İlk duyulduğu pencere de onun
+            self.merkezler.append(self.aday[0] + e)
+            self.etiketler.append((self.aday[1], len(self.merkezler)))
             self.aday = None
             return len(self.merkezler)
         else:
-            self.aday = e
+            self.aday = (e, self._pencere_ortasi)
             return None  # emin değiliz, bu pencere etiketsiz kalsın
         self.merkezler[i] = self.merkezler[i] + e
         self.aday = None
@@ -235,6 +382,7 @@ class KonusmaciAyirici:
         self.ses = np.concatenate([self.ses, parca])
         son = self.ses_baslangic + len(self.ses) / ORNEK_HIZI
         while self.sonraki + self.PENCERE <= son:
+            self._pencere_ortasi = self.sonraki + self.PENCERE / 2
             e = self._parmak_izi(self.sonraki, self.sonraki + self.PENCERE)
             if e is not None:
                 if not self.merkezler:
@@ -253,13 +401,63 @@ class KonusmaciAyirici:
             self.ses_baslangic += kes / ORNEK_HIZI
             self.etiketler = [x for x in self.etiketler if x[0] >= self.ses_baslangic]
 
+    @property
+    def islenen(self):
+        """Konuşmacısı belirlenmiş sesin sonu (sn): son işlenen pencerenin bitişi."""
+        return self.sonraki - self.ADIM + self.PENCERE
+
+    def hazir_mi(self, zaman):
+        """Bu ana kadar söylenen kelimenin konuşmacısına karar verecek pencereler hazır mı?
+        Kelimenin yarım pencere sonrasına kadar ses işlenmiş olmalı; yoksa konuşmacı
+        değiştiği anda yalnızca eski konuşmacının pencereleri oy verir."""
+        return self.islenen >= zaman + self.PENCERE / 2 + 0.25
+
     def kim(self, a, b):
-        """[a, b] aralığında en çok kim konuşmuş?"""
-        oylar = [no for t, no in self.etiketler if a - 0.5 <= t <= b + 0.5]
-        if not oylar and self.etiketler:
-            _, no = min(self.etiketler, key=lambda x: abs(x[0] - (a + b) / 2))
-            return no
-        return max(set(oylar), key=oylar.count) if oylar else None
+        """[a, b] aralığında en çok kim konuşmuş? Kelimeye yakın pencerenin oyu daha ağır."""
+        orta = (a + b) / 2
+        yaricap = max(0.75, (b - a) / 2 + 0.25)
+        oylar = {}
+        for t, no in self.etiketler:
+            uzaklik = abs(t - orta)
+            if uzaklik <= yaricap:
+                oylar[no] = oylar.get(no, 0.0) + 1.0 - uzaklik / (yaricap + 0.01)
+        if oylar:
+            return max(oylar, key=oylar.get)
+        if self.etiketler:
+            return min(self.etiketler, key=lambda x: abs(x[0] - orta))[1]
+        return None
+
+
+def konusmaci_gruplari(kelimeler, ayirici):
+    """Her kelimenin konuşmacısını ayrı belirle, aynı kişinin art arda kelimelerini grupla.
+    Dönüş: [(konuşmacı_no, [kelimeler])]. Konuşmacı cümlenin ortasında değişse bile
+    değiştiği kelimeden itibaren yeni kişiye yazılır."""
+    if not kelimeler:
+        return []
+    if ayirici is None:
+        return [(None, g) for g in gruplara_bol(kelimeler)]
+    kimler = [ayirici.kim(b, e) for b, e, _ in kelimeler]
+    # ek ve noktalama parçası ('ı, ,) önceki kelimeyle aynı kişinindir
+    for i in range(1, len(kelimeler)):
+        if yapisik(kelimeler[i][2]):
+            kimler[i] = kimler[i - 1]
+    # tek kelimelik sapmayı düzelt: A A B A -> A A A A (pencere karışması)
+    for i in range(1, len(kimler) - 1):
+        if kimler[i - 1] == kimler[i + 1] != kimler[i]:
+            kimler[i] = kimler[i - 1]
+    sonuc, bas = [], 0
+    for grup in gruplara_bol(kelimeler):
+        parca, onceki_kim = [], kimler[bas]
+        for j, k in enumerate(grup):
+            kim = kimler[bas + j]
+            if parca and kim != onceki_kim:
+                sonuc.append((onceki_kim, parca))
+                parca = []
+            parca.append(k)
+            onceki_kim = kim
+        sonuc.append((onceki_kim, parca))
+        bas += len(grup)
+    return sonuc
 
 
 def gruplara_bol(kelimeler):
@@ -277,8 +475,40 @@ def gruplara_bol(kelimeler):
 
 
 def harf(no):
-    """Konuşmacı numarasını ekranda gösterilecek harfe çevir: 1 -> A, 2 -> B ..."""
-    return chr(ord("A") + no - 1)
+    """Konuşmacı numarasını ekranda gösterilecek etikete çevir: 1 -> A, 2 -> B ...
+    Operatör o harfe isim verdiyse (konusmaci_isimleri.json) isim gösterilir."""
+    h = chr(ord("A") + no - 1)
+    return konusmaci_adlari.get(h) or h
+
+
+# Operatörün yayın sırasında harflere verdiği isimler: {"A": "CEM", "B": "AHMET"}
+konusmaci_adlari = {}
+_adlar_dosyasi = None
+_adlar_zamani = None
+
+
+def konusmaci_adlarini_yukle():
+    """Dosya değiştiyse isimleri yeniden oku. Değiştiyse True döner."""
+    global _adlar_zamani
+    if not _adlar_dosyasi:
+        return False
+    try:
+        zaman = _adlar_dosyasi.stat().st_mtime
+    except OSError:
+        zaman = None
+    if zaman == _adlar_zamani:
+        return False
+    _adlar_zamani = zaman
+    try:
+        veri = json.loads(_adlar_dosyasi.read_text(encoding="utf-8")) if zaman else {}
+    except (OSError, ValueError):
+        return False  # dosya yazılırken okunduysa bir sonraki turda tekrar dener
+    yeni = {str(k).upper(): str(v).strip() for k, v in veri.items() if str(v).strip()}
+    if yeni == konusmaci_adlari:
+        return False
+    konusmaci_adlari.clear()
+    konusmaci_adlari.update(yeni)
+    return True
 
 
 # ---------------------------------------------------------------- ekran
@@ -296,7 +526,73 @@ def satir_metni(satir):
 
 
 def ekran_satirlari():
+    if KONUSMACI_DUZENI:
+        return [satir_metni((y["kim"], y["metin"])) for y in yuvalar]
     return ([""] * 2 + [satir_metni(s) for s in satirlar])[-2:]
+
+
+# ---- "Her satır bir konuşmacı" düzeni
+# satir1 ilk konuşanın, satir2 ikinci konuşanın satırıdır; iki kişi karışmaz.
+# Satır dolunca o konuşmacının satırı temizlenip yeni cümleyle baştan yazılır (sayfa çevirme).
+# Satırın sahibi sabittir. Üçüncü biri konuşursa en uzun süredir susan kişinin satırını
+# geçici olarak ödünç alır; sahibi konuşunca satırı geri alır.
+KONUSMACI_DUZENI = False
+SATIR_BEKLEME = 8.0  # bir konuşmacı bu kadar sn susarsa satırı silinir (0 = silme)
+yuvalar = [{"sahip": None, "kim": None, "metin": "", "son": 0.0} for _ in range(2)]
+
+
+def _yuva_bul(kim):
+    if kim is None:
+        # kim konuştuğu belirsizse en son konuşanın satırına yaz
+        return max(range(len(yuvalar)), key=lambda j: yuvalar[j]["son"])
+    for anahtar in ("sahip", "kim"):  # önce kendi satırı, sonra ödünç aldığı satır
+        for j, y in enumerate(yuvalar):
+            if y[anahtar] == kim:
+                return j
+    for j, y in enumerate(yuvalar):  # sahipsiz satır: artık onun
+        if y["sahip"] is None:
+            y["sahip"] = kim
+            return j
+    return min(range(len(yuvalar)), key=lambda j: yuvalar[j]["son"])  # ödünç
+
+
+_son_yazan = [None]
+
+
+def yuva_kelime_ekle(k, kim, zaman):
+    i = _yuva_bul(kim)
+    y = yuvalar[i]
+    if kim is not None and y["kim"] != kim:
+        y["kim"], y["metin"] = kim, ""  # satıra başka biri geçti: baştan yaz
+    elif kim is not None and _son_yazan[0] != kim:
+        y["metin"] = ""  # sıra ona geçti: yeni sözü temiz satırda başlasın
+    if kim is not None:
+        _son_yazan[0] = kim
+    # ödünç alan konuştuğu sürece, başka bir satır onu "kim" olarak tutmasın
+    for d in yuvalar:
+        if d is not y and d["kim"] == kim and d["sahip"] != kim:
+            d["kim"], d["metin"] = d["sahip"], ""
+    bitisik = yapisik(k)
+    k = k.strip()
+    if bitisik and y["metin"]:
+        y["metin"] += k
+    elif y["metin"] and len(satir_metni((y["kim"], y["metin"]))) + 1 + len(k) > SATIR_UZUNLUGU:
+        y["metin"] = k
+    else:
+        y["metin"] = (y["metin"] + " " + k).strip()
+    y["son"] = zaman
+
+
+def eski_satirlari_sil(simdi):
+    """Uzun süredir susan konuşmacının satırını boşalt. Değişiklik olduysa True."""
+    if not KONUSMACI_DUZENI or SATIR_BEKLEME <= 0:
+        return False
+    degisti = False
+    for y in yuvalar:
+        if y["metin"] and simdi - y["son"] > SATIR_BEKLEME:
+            y["metin"] = ""  # satır o kişide kalır, tekrar konuşunca aynı satıra yazar
+            degisti = True
+    return degisti
 
 
 def kelime_ekle(k, konusmaci=None):
@@ -514,7 +810,23 @@ def main():
                    help="Düşürürsen daha az kişi bulur, yükseltirsen daha çok (0.2-0.4)")
     p.add_argument("--konusmaci-sayisi", type=int, default=4, help="En fazla kaç kişi")
     p.add_argument("--tarayici-acma", action="store_true", help="Altyazı sayfasını otomatik açma")
+    p.add_argument("--isimler", help="Özel isim listesi (.txt). Biçim için isimler.txt'ye bak")
+    p.add_argument("--konusmaci-adlari",
+                   help='Harflere isim veren .json ({"A": "CEM", "B": "AHMET"}). '
+                        "Yayın sırasında değiştirilebilir, program kendisi okur")
+    p.add_argument("--satir-duzeni", choices=["konusmaci", "kayan"], default="konusmaci",
+                   help="konusmaci: satir1 = 1. konuşmacı, satir2 = 2. konuşmacı (varsayılan, --konusmaci ile). "
+                        "kayan: iki satır alttan yukarı kayar")
+    p.add_argument("--satir-bekleme", type=float, default=8.0,
+                   help="'konusmaci' düzeninde, bu kadar sn susan kişinin satırı silinir (0 = silme)")
+    p.add_argument("--satir-uzunlugu", type=int, default=42,
+                   help="Bir satıra en fazla kaç karakter sığar (Viz'de yazıyı küçültürsen artır)")
     a = p.parse_args()
+
+    global KONUSMACI_DUZENI, SATIR_BEKLEME, SATIR_UZUNLUGU, _adlar_dosyasi
+    SATIR_UZUNLUGU = max(20, a.satir_uzunlugu)
+    KONUSMACI_DUZENI = a.konusmaci and a.satir_duzeni == "konusmaci"
+    SATIR_BEKLEME = a.satir_bekleme
 
     if a.liste:
         import sounddevice as sd
@@ -533,7 +845,11 @@ def main():
     print(f"Model yükleniyor: {a.model} ...")
     model = WhisperModel(a.model, device="cuda", compute_type="float16")
     model.transcribe(np.zeros(ORNEK_HIZI, dtype=np.float32), language="tr")  # ısınma turu
-    yazici = CanliYazici(model, a.beam, a.esik)
+    duzeltici = None
+    if a.isimler:
+        duzeltici = IsimDuzeltici(a.isimler)
+        print(f"İsim listesi: {len(duzeltici.isimler)} isim ({Path(a.isimler).name})")
+    yazici = CanliYazici(model, a.beam, a.esik, duzeltici)
 
     ayirici = None
     if a.konusmaci:
@@ -542,6 +858,13 @@ def main():
             sys.exit(f"Konuşmacı modeli bulunamadı: {model_yolu}")
         ayirici = KonusmaciAyirici(model_yolu, a.konusmaci_esik, a.konusmaci_sayisi, a.esik)
         print("Konuşmacı ayırma açık (A, B, C, D)")
+        if KONUSMACI_DUZENI:
+            print("Satır düzeni: satir1 = 1. konuşmacı, satir2 = 2. konuşmacı")
+        if a.konusmaci_adlari:
+            _adlar_dosyasi = Path(a.konusmaci_adlari)
+            konusmaci_adlarini_yukle()
+            if konusmaci_adlari:
+                print("Konuşmacı isimleri: " + ", ".join(f"{h}={ad}" for h, ad in sorted(konusmaci_adlari.items())))
 
     viz = None
     if a.viz:
@@ -560,6 +883,7 @@ def main():
     kayit = kayit_yolu.open("w", encoding="utf-8")
     son_islenen = 0.0
     bitti = False
+    konusma_kuyrugu = []  # kesinleşti, konuşmacısının belli olmasını bekliyor
     print("Durdurmak için Ctrl+C\n")
 
     try:
@@ -576,6 +900,13 @@ def main():
                 yazici.ekle(yeni_ses)
                 if ayirici:
                     ayirici.ekle(yeni_ses)
+            if konusmaci_adlarini_yukle():
+                # Operatör isim verdi/değiştirdi: ekrandaki satırları hemen yeni isimle bas
+                print("\n[İsimler] " + (", ".join(f"{h}={ad}" for h, ad in sorted(konusmaci_adlari.items())) or "harflere dönüldü"))
+                if viz:
+                    viz.yaz(*ekran_satirlari())
+                with durum_kilidi:
+                    durum["satirlar"] = ekran_satirlari()
             if not bitti and yazici.alinan - son_islenen < EN_KISA_PARCA:
                 continue
 
@@ -586,24 +917,36 @@ def main():
                 kesinlesen += bekleyen
                 bekleyen = []
 
+            # Konuşmacı ayırma açıksa kelimeyi, kimin söylediği belli olana kadar (sesin
+            # yarım pencere sonrası da işlenene kadar, ~1 sn) beklet. Yoksa yeni konuşmacının
+            # ilk kelimeleri eski konuşmacıya yazılıyordu.
+            konusma_kuyrugu.extend(kesinlesen)
+            n = len(konusma_kuyrugu)
+            if ayirici and not bitti:
+                n = 0
+                while n < len(konusma_kuyrugu) and ayirici.hazir_mi(konusma_kuyrugu[n][1]):
+                    n += 1
+            kesinlesen, konusma_kuyrugu[:] = konusma_kuyrugu[:n], konusma_kuyrugu[n:]
+
             if kesinlesen:
-                for grup in gruplara_bol(kesinlesen):
-                    kim = ayirici.kim(grup[0][0], grup[-1][1]) if ayirici else None
+                for kim, grup in konusmaci_gruplari(kesinlesen, ayirici):
                     if kim is not None and kim != son_konusmaci:
                         print(f"\n{harf(kim)}:", end=" ")
-                    for _, _, k in grup:
-                        kelime_ekle(k, kim)
+                    for _, son, k in grup:
+                        kelime_ekle(k, kim)  # kayan düzen + terminal/döküm için konuşmacı takibi
+                        if KONUSMACI_DUZENI:
+                            yuva_kelime_ekle(k, kim, son)
                     metin = birlestir(k for _, _, k in grup)
                     print(metin, end=" ", flush=True)
                     etiket = f" {harf(kim)}:" if kim is not None else ""
                     kayit.write(f"[{grup[0][0]:8.1f}]{etiket} {metin}\n")
                 kayit.flush()
-                if viz:
-                    s1, s2 = ekran_satirlari()
-                    viz.yaz(s1, s2)
+            silinen = eski_satirlari_sil(alinan)
+            if viz and (kesinlesen or silinen):
+                viz.yaz(*ekran_satirlari())
             with durum_kilidi:
                 durum["satirlar"] = ekran_satirlari()
-                durum["bekleyen"] = birlestir(k for _, _, k in bekleyen)
+                durum["bekleyen"] = birlestir(k for _, _, k in konusma_kuyrugu + bekleyen)
                 if kesinlesen:
                     durum["gecikme"] = alinan - kesinlesen[-1][1] + (time.time() - t0)
     except KeyboardInterrupt:
@@ -617,6 +960,11 @@ def main():
         try:
             while True:
                 time.sleep(1)
+                if konusmaci_adlarini_yukle():
+                    if viz:
+                        viz.yaz(*ekran_satirlari())
+                    with durum_kilidi:
+                        durum["satirlar"] = ekran_satirlari()
         except KeyboardInterrupt:
             pass
 

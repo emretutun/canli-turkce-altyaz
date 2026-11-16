@@ -1,0 +1,16 @@
+# Canlı altyazı özel isim listesi
+#
+# Her satıra bir isim yaz, doğru yazılışıyla.
+# Program bu isimleri tanırken önceden bilir ve isme çok benzeyen kelimeleri düzeltir.
+#
+# Whisper bir ismi hep aynı şekilde yanlış yazıyorsa "=" ile yanlış hâllerini ekle (virgülle):
+#     Doğru İsim = yanlış hâl 1, yanlış hâl 2
+# Yanlış hâlleri canli_kayit_*.txt dökümlerinden bakıp ekleyebilirsin.
+# Ekler (Torreira'nın, Torreira'yı) kendiliğinden korunur, onları ayrıca yazma.
+#
+# İpucu: Listeyi maça/programa göre kısa tut (o gün geçecek 20-40 isim yeterli).
+
+# --- Futbolcular ---
+Oh Hyeon-gyu = Oyan Yuh, Oiyanyu, Oyanyu, O Hyon Gyu, Oyan-gyu
+Torreira = Torayra, Toreyra, Torreyra
+Abraham

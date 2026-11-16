@@ -73,7 +73,44 @@ Altyazı önizlemesi: http://localhost:8765 — her çalıştırmada `canli_kayi
 | `--viz-kodlama cp1254` | Türkçe harfler Viz'de bozuk çıkarsa |
 | `--konusmaci-esik` | 0.3 varsayılan. Aynı kişi iki harf alıyorsa düşürün, farklı kişiler aynı harfi alıyorsa yükseltin |
 | `--kanal` | Çok kanallı ses kartında kullanılacak kanal |
-| `--beam 5` | Daha doğru ama daha yavaş tanıma |
+| `--beam 5` | Daha doğru ama daha yavaş tanıma (özel isimlerde belirgin fark eder) |
+| `--isimler isimler.txt` | Özel isim listesi. Whisper'a ipucu verir ve yanlış yazılan isimleri düzeltir |
+
+### Özel isimler (oyuncu, yabancı isimler)
+
+`isimler.txt` dosyasına her satıra bir isim yazılır. Whisper bir ismi hep aynı şekilde
+yanlış yazıyorsa, yanlış hâller `=` sonrasına virgülle eklenir:
+
+```
+Torreira = Torayra, Toreyra
+Oh Hyeon-gyu = Oyan Yuh, Oiyanyu
+```
+
+İsimler Whisper'a `hotwords` olarak verilir. Ayrıca tanıma sonrası bilinen yanlış hâller ve
+isme çok benzeyen büyük harfli kelimeler düzeltilir, ekler korunur (`Torayra'nın` → `Torreira'nın`).
+Yanlış hâller `canli_kayit_*.txt` dökümlerine bakılarak eklenebilir.
+
+### Satır düzeni
+
+Konuşmacı ayırma açıkken varsayılan düzen **her satır bir konuşmacı**dır: `satir1` ilk konuşanın,
+`satir2` ikinci konuşanın satırıdır, iki kişinin sözü aynı satırda karışmaz. Satır dolunca o
+konuşmacının satırı baştan yazılır; sıra bir kişiye geçince sözü temiz satırda başlar; 8 sn susan
+kişinin satırı silinir (`--satir-bekleme`). Üçüncü bir konuşmacı en uzun süredir susan kişinin
+satırını geçici olarak kullanır, sahibi konuşunca satır ona döner.
+
+Eski alttan yukarı kayan düzen için `--satir-duzeni kayan` (başlatma ekranında "Her satır bir
+konuşmacı" kutusunu kaldırmak). Viz'de yazı küçültülürse `--satir-uzunlugu` (ekranda "Satır
+uzunluğu") artırılarak bir satıra daha çok kelime sığdırılabilir.
+
+### Konuşmacılara isim verme
+
+Harfler konuşma sırasına göre verilir (ilk konuşan A). Başlatma ekranındaki **Konuşmacı isimleri**
+kutularına `A = CEM`, `B = KONUK` gibi isim yazılınca, yayın sürerken bile Viz'deki ve önizlemedeki
+satırlar yarım saniye içinde `CEM: ...` olarak güncellenir. Komut satırında aynı şey
+`--konusmaci-adlari konusmaci_isimleri.json` ile yapılır; program dosyayı değiştikçe yeniden okur.
+
+Komut yazmadan çalıştırmak için `Canli Altyazi.bat` dosyasına çift tıklanır: video ve isim
+listesi seçilip **Başlat**'a basılır.
 
 ## Nasıl çalışır
 

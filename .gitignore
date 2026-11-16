@@ -14,3 +14,6 @@ modeller/*.onnx
 *.jpg
 *.png
 canli_kayit_*.txt
+baslat_ayar.json
+konusmaci_isimleri.json
+konusmaci_isimleri.tmp
